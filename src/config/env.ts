@@ -6,7 +6,6 @@
  */
 
 export const STORAGE_STATE = 'playwright/.auth/user.json';
-export const SESSION_STORAGE_STATE = 'playwright/.auth/session-storage.json';
 
 function required(name: string): string {
   const value = process.env[name];

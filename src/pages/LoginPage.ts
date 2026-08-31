@@ -27,12 +27,12 @@ export class LoginPage {
 
   /** Navigate to the app, which redirects to the IdP when signed out. */
   async goto(): Promise<void> {
-    await this.page.goto('./');
+    await this.page.goto('./', { waitUntil: 'domcontentloaded' });
     await this.waitUntilReady();
   }
 
   async waitUntilReady(): Promise<void> {
-    await expect(this.usernameInput).toBeVisible({ timeout: 30_000 });
+    await expect(this.usernameInput).toBeVisible({ timeout: 60_000 });
     await expect(this.passwordInput).toBeVisible();
   }
 
@@ -43,8 +43,12 @@ export class LoginPage {
     await this.signInButton.click();
 
     // Wait to land back on the ops SPA rather than the identity provider.
-    await this.page.waitForURL(/\/ops\//, { timeout: 60_000 });
-    await this.page.waitForLoadState('networkidle');
+    // `waitUntil: 'commit'` because the app holds long-lived connections open,
+    // so the `load` event may never fire.
+    await this.page.waitForURL(/\/ops\//, {
+      timeout: 60_000,
+      waitUntil: 'commit',
+    });
   }
 
   /** Error banner shown when credentials are rejected. */

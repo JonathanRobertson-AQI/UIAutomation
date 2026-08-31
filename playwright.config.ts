@@ -18,13 +18,19 @@ export default defineConfig({
     ? [['html', { open: 'never' }], ['github']]
     : [['html', { open: 'never' }], ['list']],
 
+  // The ops SPA boots slowly and then walks a chain of redirects to restore
+  // the user's last context. Firefox in particular needs well over the 30s
+  // default to get through a cold load.
+  timeout: 90_000,
+  expect: { timeout: 15_000 },
+
   use: {
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     actionTimeout: 15_000,
-    navigationTimeout: 30_000,
+    navigationTimeout: 60_000,
   },
 
   projects: [

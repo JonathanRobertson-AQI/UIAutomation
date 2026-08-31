@@ -1,16 +1,16 @@
 import { test as setup, expect } from '@playwright/test';
 import { LoginPage } from '../src/pages/LoginPage';
 import { OpsHomePage } from '../src/pages/OpsHomePage';
-import { saveSessionStorage } from '../src/fixtures/sessionStorage';
 import { env, STORAGE_STATE } from '../src/config/env';
 
 /**
- * Runs once before the test projects. Signs in with the credentials from the
- * environment and persists the resulting session so tests don't each pay the
- * cost of a full OIDC round trip.
+ * Runs once before the authenticated test projects. Signs in with the
+ * credentials from the environment and persists the resulting session so
+ * tests don't each pay the cost of a full OIDC round trip.
  *
- * Tokens from an implicit flow are short lived, so this runs on every
- * invocation of the suite rather than being cached between runs.
+ * The app keeps its tokens in localStorage, which `storageState` captures.
+ * Those tokens are short lived, so this runs on every invocation of the suite
+ * rather than being cached between runs.
  */
 setup('authenticate', async ({ page }) => {
   setup.setTimeout(120_000);
@@ -30,5 +30,4 @@ setup('authenticate', async ({ page }) => {
     .toBe(false);
 
   await page.context().storageState({ path: STORAGE_STATE });
-  await saveSessionStorage(page);
 });

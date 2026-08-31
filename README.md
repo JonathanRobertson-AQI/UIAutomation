@@ -78,13 +78,9 @@ that on-demand production runs stay read-only.
 The app uses OIDC implicit flow. A `setup` project signs in once per run and
 saves the session to `playwright/.auth/`, which every authenticated test reuses.
 
-Playwright's `storageState` covers cookies and localStorage but not
-sessionStorage, so `src/fixtures/sessionStorage.ts` captures and replays
-sessionStorage as well. That keeps auth reuse working regardless of where the
-app stores its tokens.
-
-Tokens are short lived, so the sign-in runs on each invocation rather than
-being cached between runs. `playwright/.auth/` is gitignored.
+Tokens are stored in localStorage, which Playwright's `storageState` captures.
+They are short lived, so the sign-in runs on each invocation rather than being
+cached between runs. `playwright/.auth/` is gitignored.
 
 ## Working with GUID routes
 
@@ -94,8 +90,38 @@ environment-bound and brittle, so instead:
 
 1. Page objects navigate by **clicking through the UI**, and read GUIDs back off
    the resulting URL (`OpsHomePage.currentPlantId()`).
-2. Test data is configured by **name** (`TEST_PLANT_NAME`), never by ID.
+2. Test data is configured by **name**, never by ID.
 3. Locators use `getByRole` / `getByLabel` / `data-testid` rather than CSS paths.
+
+## Two timing behaviours worth knowing
+
+Both of these caused real test failures and are handled in `OpsHomePage`.
+
+**The splash screen never disappears.** `#cm-splash-screen` stays in the DOM and
+is only faded out with `opacity: 0; z-index: -10`, which Playwright still counts
+as visible. Waiting for it to hide times out. The toolbar becoming visible is
+the reliable "app has rendered" signal.
+
+**Sign-in triggers a chain of redirects.** The app restores the user's last
+context by walking `/ops/` to the plant, then the section, then the record,
+finishing roughly four seconds after the shell renders. Clicking during that
+window gets silently undone by the pending navigation. `waitForContextRestored()`
+waits this out, and `goto()` calls it, so tests generally don't need to think
+about it.
+
+A third consequence: the app holds long-lived connections open, so the `load`
+event and `networkidle` may never arrive — Firefox in particular never fires
+`load` here. Navigation waits therefore use `waitUntil: 'domcontentloaded'` or
+`'commit'`, and readiness is asserted explicitly instead.
+
+## Known issues found while writing these tests
+
+**Intermittent `Failed to login` console error.** Appears sporadically on load
+while the app restores a session. There is no visible impact — the app loads
+and works — but it is logged as a console error, so
+`tests/smoke/ops-shell.spec.ts` filters it out to avoid a flaky gate. Worth
+investigating in the app: it suggests a race in token restoration. Remove the
+filter once it is fixed.
 
 ## Project layout
 
@@ -112,20 +138,16 @@ tests/auth.setup.ts        # one-time sign-in
 
 ## Adding tests
 
-Import `test` and `expect` from the fixtures module so page objects and
-sessionStorage handling are wired up automatically:
+Import `test` and `expect` from the fixtures module so the page objects are
+wired up automatically:
 
 ```ts
 import { test, expect } from '../../src/fixtures/test';
 
 test('does something @smoke', async ({ opsHome }) => {
   await opsHome.goto();
-  await opsHome.waitForAppReady();
+  await expect(opsHome.navLink('Reports')).toBeVisible();
 });
 ```
 
 Use `npm run codegen` to record selectors against the running app.
-
-> The authenticated page objects were written without access to a test account.
-> Once you have one, confirm the accessible names with `npm run test:ui` or
-> `npm run codegen` and refine `src/pages/OpsHomePage.ts` as needed.
