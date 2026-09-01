@@ -1,0 +1,74 @@
+name: UI Tests
+
+on:
+  # On-demand runs against any published environment.
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: 'Base URL to test (must end with a trailing slash)'
+        required: true
+        default: 'https://feature-us.aquaticinformatics.net/ops/'
+      project:
+        description: 'Which suite to run'
+        required: true
+        default: 'smoke'
+        type: choice
+        options:
+          - public
+          - smoke
+          - smoke-firefox
+          - smoke-webkit
+          - full
+      grep:
+        description: 'Optional tag filter, e.g. @smoke'
+        required: false
+        default: ''
+
+  schedule:
+    # Nightly regression against the feature environment.
+    - cron: '0 8 * * *'
+
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ui-tests-${{ github.ref }}-${{ inputs.base_url || 'default' }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BASE_URL: ${{ inputs.base_url || vars.BASE_URL || 'https://feature-us.aquaticinformatics.net/ops/' }}
+      TEST_USER: ${{ secrets.TEST_USER }}
+      TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
+      TEST_PLANT_NAME: ${{ vars.TEST_PLANT_NAME }}
+      TEST_WORKSHEET_NAME: ${{ vars.TEST_WORKSHEET_NAME }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run tests
+        run: >-
+          npx playwright test
+          --project=${{ inputs.project || 'smoke' }}
+          ${{ inputs.grep && format('--grep={0}', inputs.grep) || '' }}
+
+      - name: Upload report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.run_attempt }}
+          path: playwright-report/
+          retention-days: 14

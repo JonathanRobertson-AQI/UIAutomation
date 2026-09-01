@@ -1,0 +1,27 @@
+{
+  "name": "aqi-ui-automation",
+  "version": "1.0.0",
+  "description": "Playwright UI automation for the AQI ops application",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "test:public": "playwright test --project=public",
+    "test:smoke": "playwright test --project=smoke",
+    "test:full": "playwright test --project=full",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "codegen": "playwright codegen https://feature-us.aquaticinformatics.net/ops/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.4.0",
+    "dotenv": "^17.4.2",
+    "typescript": "^7.0.2"
+  }
+}
