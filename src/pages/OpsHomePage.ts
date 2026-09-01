@@ -148,28 +148,73 @@ export class OpsHomePage {
   }
 
   /**
-   * Switch the active plant using the toolbar's plant picker.
+   * Open the toolbar's operation picker and return the dialog.
    *
-   * The picker opens a tenant/plant tree that is far too large to browse, so
-   * the name is typed into its search box first. Two `Search` boxes exist in
-   * the dialog and both filter the same tree; the first is used.
+   * The picker is the second toolbar button; it renders as "<tenant> <plant>".
+   */
+  async openOperationPicker(): Promise<Locator> {
+    await this.page.locator('mat-toolbar button').nth(1).click();
+
+    const dialog = this.page
+      .locator('.cdk-overlay-container, [role="dialog"]')
+      .filter({ hasText: 'Select operation' })
+      .last();
+    await expect(dialog.getByPlaceholder('Search').first()).toBeVisible({
+      timeout: 30_000,
+    });
+    return dialog;
+  }
+
+  /**
+   * Narrow the picker to operations matching `name` and return a locator over
+   * every match.
+   *
+   * Searching filters the tree down to matching branches but leaves those
+   * branches *collapsed*, so the matching leaves are not in the DOM until the
+   * tree is expanded. Both steps are required to find anything.
+   *
+   * The same operation name can exist under many tenants, so this deliberately
+   * returns all matches rather than assuming there is one.
+   */
+  async findOperations(name: string): Promise<Locator> {
+    const dialog = await this.openOperationPicker();
+
+    const search = dialog.getByPlaceholder('Search').first();
+    await search.fill(name);
+    await search.press('Enter');
+
+    const expandAll = dialog.getByText('Expand all', { exact: true });
+    if (await expandAll.count()) {
+      await expandAll.click();
+    }
+
+    const matches = dialog.getByText(name, { exact: true });
+    await expect(matches.first()).toBeVisible({ timeout: 30_000 });
+    return matches;
+  }
+
+  /**
+   * Switch the active operation (plant) by name.
+   *
+   * The same operation name can exist under many tenants. `pick` chooses among
+   * the matches given how many were found, defaulting to the first. Selection
+   * happens in a single pass because the picker's overlay blocks clicks on the
+   * toolbar, so the dialog cannot be reopened to count matches separately.
    *
    * Resolves once the URL carries a plant GUID other than the one we started
    * on, which is the app's signal that the new context has loaded.
    */
-  async switchToPlant(name: string): Promise<string> {
+  async switchToOperation(
+    name: string,
+    pick: (instanceCount: number) => number = () => 0,
+  ): Promise<{ plantId: string; index: number; instanceCount: number }> {
     const before = this.hasPlantContext() ? this.currentPlantId() : null;
 
-    // The picker is the second toolbar button; it renders as "<tenant> <plant>".
-    await this.page.locator('mat-toolbar button').nth(1).click();
+    const matches = await this.findOperations(name);
+    const instanceCount = await matches.count();
+    const index = pick(instanceCount);
 
-    const search = this.page.getByPlaceholder('Search').first();
-    await expect(search).toBeVisible({ timeout: 30_000 });
-    await search.fill(name);
-
-    const result = this.page.getByText(name, { exact: true }).first();
-    await expect(result).toBeVisible({ timeout: 30_000 });
-    await result.click();
+    await matches.nth(index).click();
 
     await this.page.waitForURL(
       (url) => {
@@ -183,7 +228,13 @@ export class OpsHomePage {
 
     await this.waitForAppReady();
     await this.waitForStableUrl();
-    return this.currentPlantId();
+    return { plantId: this.currentPlantId(), index, instanceCount };
+  }
+
+  /** Switch to a named operation, taking the first match. */
+  async switchToPlant(name: string, index = 0): Promise<string> {
+    const { plantId } = await this.switchToOperation(name, () => index);
+    return plantId;
   }
 
   /** True when the current URL is scoped to a plant. */

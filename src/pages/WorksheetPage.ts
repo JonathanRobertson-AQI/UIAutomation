@@ -161,4 +161,75 @@ export class WorksheetPage {
       { timeout },
     );
   }
+
+  /**
+   * The worksheet's sampling frequency, shown as a dropdown in the grid's
+   * top-left corner. `Daily` lists one row per day of the month; the intra-day
+   * frequencies list time slots for a single day.
+   */
+  static readonly FREQUENCIES = [
+    'Daily',
+    '4 Hour',
+    'Hourly',
+    '15 Minute',
+  ] as const;
+
+  /** Switch the worksheet to a different sampling frequency. */
+  async selectFrequency(frequency: string): Promise<void> {
+    await this.page.locator('.ag-header-cell[col-id="window"]').first().click();
+
+    const option = this.page
+      .locator(
+        '[role="menuitem"], .mat-mdc-menu-item, mat-option, [role="option"]',
+      )
+      .filter({ hasText: new RegExp(`^\\s*${frequency}\\s*$`) })
+      .first();
+    await expect(option).toBeVisible({ timeout: 15_000 });
+    await option.click();
+
+    await this.waitForReady();
+    await expect(
+      this.page.locator('.ag-header-cell[col-id="window"]').first(),
+    ).toContainText(frequency, { timeout: 30_000 });
+  }
+
+  /**
+   * The period the grid is currently showing — `September 2026` on the daily
+   * frequency, or a single day such as `Sep 1, 2026` on intra-day ones.
+   */
+  async periodLabel(): Promise<string> {
+    const label = this.page
+      .getByText(/^(?:[A-Z][a-z]{2,8} \d{1,2}, \d{4}|[A-Z][a-z]{2,8} \d{4})$/)
+      .first();
+    return (await label.innerText()).trim();
+  }
+
+  /**
+   * Count the populated cells representing today.
+   *
+   * On the daily frequency only today's row counts. The intra-day frequencies
+   * already scope the whole grid to a single day, so every row is in play.
+   */
+  async populatedCellCountForToday(isDaily: boolean): Promise<number> {
+    if (!isDaily) {
+      return this.page.evaluate(
+        () =>
+          Array.from(
+            document.querySelectorAll('.ag-center-cols-container .ag-cell'),
+          ).filter((cell) => (cell as HTMLElement).innerText.trim()).length,
+      );
+    }
+
+    const today = WorksheetPage.formatDate(new Date());
+    const rowIndex = await this.rowIndexForDate(today);
+    return this.page.evaluate(
+      (index) =>
+        Array.from(
+          document.querySelectorAll(
+            `.ag-center-cols-container .ag-row[row-index="${index}"] .ag-cell`,
+          ),
+        ).filter((cell) => (cell as HTMLElement).innerText.trim()).length,
+      rowIndex,
+    );
+  }
 }

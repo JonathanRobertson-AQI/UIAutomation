@@ -96,6 +96,23 @@ Without it, two workers write the same cell and each reads back the other's
 value. The same caveat applies to running the suite from two machines at once
 against one environment.
 
+### Picking an operation
+
+`OpsHomePage.switchToOperation()` drives the toolbar's operation picker. Two
+things about that dialog are easy to get wrong:
+
+- **Searching is not enough.** The search box narrows the tree to matching
+  branches but leaves them *collapsed*, so the matching leaf is not in the DOM
+  until "Expand all" is clicked. Searching alone finds nothing.
+- **Names are not unique.** The same operation name can exist under many
+  tenants — the RTC load-test plants below appear about fifteen times each. The
+  method therefore exposes a `pick` callback to choose among the matches.
+
+A user only sees operations under tenants they belong to, so the tree differs
+per account. Access changes require a fresh sign-in, because tenant membership
+is carried in the token: delete `playwright/.auth/` and re-run the `setup`
+project after being granted a new tenant.
+
 ## How authentication works
 
 The app uses OIDC implicit flow. A `setup` project signs in once per run and
@@ -145,6 +162,28 @@ and works — but it is logged as a console error, so
 `tests/smoke/ops-shell.spec.ts` filters it out to avoid a flaky gate. Worth
 investigating in the app: it suggests a race in token restoration. Remove the
 filter once it is fixed.
+
+**Worksheet edits can be lost if you navigate immediately.** The grid shows an
+edited value as soon as it is committed locally, roughly 600ms before the write
+reaches the API, and there is no explicit save or pending indicator. Reloading
+inside that window silently discards the entry. `WorksheetPage.enterValue()`
+waits for the row-save POST to return 2xx rather than trusting the rendered
+cell, which is what makes the data-entry test reliable.
+
+**RTC load-test plants have no data.** `tests/full/rtc-plant-data.spec.ts` is
+currently failing, and the failure looks legitimate rather than flaky. Every
+`RTCPlant with 3000 RTC params without dashboard #N` sampled so far is empty on
+both the Daily and 15 Minute worksheets — not just for today, but for every
+month checked back to July 2026, with the Minimum/Maximum/Average/Sum/GeoMean
+summary row rendering `–` throughout.
+
+Two things are worth confirming with whoever owns those fixtures:
+
+1. Whether the seeding job that populates them has been running.
+2. Why the worksheet exposes only nine parameters when the operation is named
+   for 3000. The RTC parameters do not appear in the default worksheet view, so
+   if their data is meant to be read somewhere else, this test is looking in the
+   wrong place and should be pointed at that surface instead.
 
 ## Project layout
 
