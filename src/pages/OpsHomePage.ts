@@ -237,6 +237,45 @@ export class OpsHomePage {
     return plantId;
   }
 
+  /**
+   * Open an operation's worksheet directly, by the GUID the app uses in its
+   * routes, without going through the picker.
+   *
+   * The trailing worksheet number must be omitted. `/plant/<id>/worksheet/4`
+   * is *silently redirected back to the operation the user was last on* —
+   * the page still renders a perfectly healthy worksheet, just for the wrong
+   * plant — whereas `/plant/<id>/worksheet` is honoured and lands on that
+   * operation's own default view. The check below turns any such bounce into a
+   * failure rather than letting it be read as the target's data.
+   */
+  async gotoOperationWorksheet(operationId: string): Promise<string> {
+    await this.page.goto(`./plant/${operationId}/worksheet`, {
+      waitUntil: 'domcontentloaded',
+    });
+    await this.waitForAppReady();
+    // Generous: every navigation re-boots the SPA, which refetches the whole
+    // multi-megabyte operation hierarchy. Under concurrency that comfortably
+    // outruns the default navigation timeout.
+    await this.page.waitForURL(
+      new RegExp(`/plant/${operationId}/worksheet/`, 'i'),
+      { timeout: 120_000, waitUntil: 'commit' },
+    );
+    // The app keeps redirecting to the default view after the worksheet route
+    // matches. Reading the grid before that settles races the navigation and
+    // tears down the execution context mid-evaluate.
+    await this.waitForStableUrl();
+
+    const landed = this.currentPlantId();
+    if (landed.toLowerCase() !== operationId.toLowerCase()) {
+      throw new Error(
+        `Navigating to operation ${operationId} landed on ${landed} instead. ` +
+          `The app redirects unresolvable deep links to the last-used ` +
+          `operation, so this reading would belong to the wrong plant.`,
+      );
+    }
+    return landed;
+  }
+
   /** True when the current URL is scoped to a plant. */
   hasPlantContext(): boolean {
     return new RegExp(`/plant/${GUID_PATTERN.source}`, 'i').test(
