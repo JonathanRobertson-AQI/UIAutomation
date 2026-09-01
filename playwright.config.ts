@@ -61,12 +61,9 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'], storageState: STORAGE_STATE },
     },
     {
-      name: 'smoke-firefox',
-      testDir: './tests/smoke',
-      dependencies: ['setup'],
-      use: { ...devices['Desktop Firefox'], storageState: STORAGE_STATE },
-    },
-    {
+      // Opt-in cross-browser coverage. Not part of the default run: the app is
+      // markedly slower under WebKit, so this is run deliberately rather than
+      // on every change.
       name: 'smoke-webkit',
       testDir: './tests/smoke',
       dependencies: ['setup'],

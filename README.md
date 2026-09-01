@@ -67,11 +67,34 @@ The HTML report is uploaded as a build artifact.
 | --- | --- | --- | --- |
 | `public` | `tests/public` | none | yes |
 | `smoke` | `tests/smoke` | yes | yes — read-only |
-| `smoke-firefox` / `smoke-webkit` | `tests/smoke` | yes | yes — read-only |
-| `full` | `tests` | yes | **no** — may modify data |
+| `smoke-webkit` | `tests/smoke` | yes | yes — read-only |
+| `full` | `tests` | yes | **no** — writes data |
 
 Anything that creates, edits or deletes data belongs outside `tests/smoke`, so
 that on-demand production runs stay read-only.
+
+Firefox is not covered. The app never fires the `load` event under Firefox, and
+the workarounds needed were not worth the signal for a browser the product does
+not prioritise. `smoke-webkit` gives cross-browser coverage on demand.
+
+### Data-mutating tests
+
+`tests/full/worksheet-data-entry.spec.ts` writes a real value to a real
+worksheet on the `JR Waste` test plant, so it must only run against
+non-production environments.
+
+It targets **today's row on the current month's daily worksheet**, which means
+concurrent runs all aim at the same cell. `test.describe.configure({ mode:
+'serial' })` orders the tests within a file, but Playwright still distributes
+*repeats* across workers — so `--repeat-each` on this suite needs `--workers=1`:
+
+```bash
+npx playwright test --project=full --repeat-each=3 --workers=1
+```
+
+Without it, two workers write the same cell and each reads back the other's
+value. The same caveat applies to running the suite from two machines at once
+against one environment.
 
 ## How authentication works
 
@@ -132,6 +155,7 @@ src/pages/                 # page objects
 src/fixtures/              # custom test fixtures
 tests/public/              # signed-out tests
 tests/smoke/               # authenticated read-only tests
+tests/full/                # authenticated tests that write data
 tests/auth.setup.ts        # one-time sign-in
 .github/workflows/         # CI and on-demand workflow
 ```

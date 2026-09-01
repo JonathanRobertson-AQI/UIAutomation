@@ -147,6 +147,45 @@ export class OpsHomePage {
     return match[1];
   }
 
+  /**
+   * Switch the active plant using the toolbar's plant picker.
+   *
+   * The picker opens a tenant/plant tree that is far too large to browse, so
+   * the name is typed into its search box first. Two `Search` boxes exist in
+   * the dialog and both filter the same tree; the first is used.
+   *
+   * Resolves once the URL carries a plant GUID other than the one we started
+   * on, which is the app's signal that the new context has loaded.
+   */
+  async switchToPlant(name: string): Promise<string> {
+    const before = this.hasPlantContext() ? this.currentPlantId() : null;
+
+    // The picker is the second toolbar button; it renders as "<tenant> <plant>".
+    await this.page.locator('mat-toolbar button').nth(1).click();
+
+    const search = this.page.getByPlaceholder('Search').first();
+    await expect(search).toBeVisible({ timeout: 30_000 });
+    await search.fill(name);
+
+    const result = this.page.getByText(name, { exact: true }).first();
+    await expect(result).toBeVisible({ timeout: 30_000 });
+    await result.click();
+
+    await this.page.waitForURL(
+      (url) => {
+        const match = url.pathname.match(
+          new RegExp(`/plant/(${GUID_PATTERN.source})`, 'i'),
+        );
+        return Boolean(match) && match![1] !== before;
+      },
+      { timeout: 60_000, waitUntil: 'commit' },
+    );
+
+    await this.waitForAppReady();
+    await this.waitForStableUrl();
+    return this.currentPlantId();
+  }
+
   /** True when the current URL is scoped to a plant. */
   hasPlantContext(): boolean {
     return new RegExp(`/plant/${GUID_PATTERN.source}`, 'i').test(
