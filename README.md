@@ -96,6 +96,54 @@ Without it, two workers write the same cell and each reads back the other's
 value. The same caveat applies to running the suite from two machines at once
 against one environment.
 
+### Auditing a whole tenant
+
+`tests/full/rtc-tenant-audit.spec.ts` walks every operation under one tenant and
+reports which ones have data for today. It is read-only, but it targets seeded
+load-test tenants, so it lives in `full` rather than `smoke`.
+
+```bash
+npx playwright test --project=full tests/full/rtc-tenant-audit.spec.ts
+```
+
+It writes a Markdown report — operation name, sub-tenant, link, and whether data
+was found — to `test-results/rtc-tenant-audit.md`, and attaches it to the HTML
+report. The test fails if any operation lacks data, and the failure message
+names the first twenty.
+
+Environment variables let it be pointed elsewhere without editing the spec:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AUDIT_TENANT` | `RtcLpt-Root-2026-08-26 17:23:03Z` | Tenant to walk |
+| `AUDIT_PREFIX` | `RTCPlant` | Only audit operations whose name starts with this |
+| `AUDIT_CONCURRENCY` | `3` | Operations checked at once |
+| `AUDIT_LIMIT` | unset | Stop after N operations, for a quick smoke check |
+
+A few things about it are worth knowing:
+
+- **It does not drive the operation picker.** The app loads the entire operation
+  hierarchy on boot to populate that picker, so `OperationDirectory` captures
+  that response and resolves operations straight to their route GUIDs. Driving
+  the picker 150 times — a search and a full tree expansion each — would take
+  roughly an hour.
+- **Deep links must omit the worksheet number.** `/plant/<id>/worksheet` is
+  honoured; `/plant/<id>/worksheet/4` is *silently redirected to whichever
+  operation the user was last on*, and still renders a healthy worksheet, so the
+  numbers would quietly belong to the wrong plant. `gotoOperationWorksheet()`
+  asserts the landed GUID for exactly this reason.
+- **"Could not be read" is not "no data".** Every navigation re-boots the SPA and
+  refetches several megabytes of hierarchy, which occasionally times out. Those
+  operations are retried, then reported separately — calling them empty would
+  blame the seeding job for a test-harness problem.
+- **Video and traces are disabled for this spec.** At 150 navigations they run to
+  gigabytes and once filled the disk mid-run. The report is the artefact worth
+  keeping; anything that needs a trace can be re-run as a single operation.
+- **An empty worksheet costs an extra 15 seconds.** A zero reading is only
+  trusted once it has held for that long — see the value-load race under [known
+  issues](#known-issues-found-while-writing-these-tests). Without that hold the
+  audit is not reproducible, so the time is not optional.
+
 ### Picking an operation
 
 `OpsHomePage.switchToOperation()` drives the toolbar's operation picker. Two
@@ -170,20 +218,41 @@ inside that window silently discards the entry. `WorksheetPage.enterValue()`
 waits for the row-save POST to return 2xx rather than trusting the rendered
 cell, which is what makes the data-entry test reliable.
 
-**RTC load-test plants have no data.** `tests/full/rtc-plant-data.spec.ts` is
-currently failing, and the failure looks legitimate rather than flaky. Every
-`RTCPlant with 3000 RTC params without dashboard #N` sampled so far is empty on
-both the Daily and 15 Minute worksheets — not just for today, but for every
-month checked back to July 2026, with the Minimum/Maximum/Average/Sum/GeoMean
-summary row rendering `–` throughout.
+**Worksheet values arrive long after the grid renders.** The grid draws its rows
+and columns from the worksheet *definition*, which returns well before the
+*values* do — measured at up to 14.5 seconds later on a busy server. Nothing in
+the UI distinguishes "no data" from "data still loading": both render as empty
+cells. Counting straight after the grid appears therefore reports populated
+worksheets as empty, and because the delay varies, the same plant can come back
+differently on consecutive runs.
 
-Two things are worth confirming with whoever owns those fixtures:
+Two things together make the reading trustworthy:
 
-1. Whether the seeding job that populates them has been running.
-2. Why the worksheet exposes only nine parameters when the operation is named
-   for 3000. The RTC parameters do not appear in the default worksheet view, so
-   if their data is meant to be read somewhere else, this test is looking in the
-   wrong place and should be pointed at that surface instead.
+1. `waitForRowData()` waits for the `.../worksheet/N/rows/...` response, and must
+   be subscribed to *before* the action that triggers it (the navigation, or the
+   frequency change).
+2. `settledPopulatedCellCountForToday()` treats the two outcomes asymmetrically.
+   Cells never un-populate, so any non-zero count is conclusive immediately,
+   while a zero is only believed once it has held for a full 15-second window.
+   Polling for two *equal* consecutive readings — the obvious approach — is
+   wrong here, because it settles on the leading run of zeros and reintroduces
+   exactly the false negative it was meant to remove.
+
+Note also that the worksheet number in that URL identifies the frequency, not
+the plant: `worksheet/4` is Daily and `worksheet/1` is 15 Minute.
+
+**RTC load-test plants: data depends on the tenant.** Under
+`RtcLpt-Root-2026-08-26 17:23:03Z` most `RTCPlant with 3000 RTC params without
+dashboard #N` operations do have data for today, but only on the **15 Minute**
+worksheet — Daily reads zero everywhere, consistently, and it is worth
+confirming with the fixture owners that this is intended rather than a gap in
+the seeding job. Earlier `RtcLpt-Root-*` tenants sampled by
+`tests/full/rtc-plant-data.spec.ts` were empty on both frequencies.
+
+Also unexplained: the worksheet exposes only nine parameters when the operation
+is named for 3000. The RTC parameters do not appear in the default worksheet
+view, so if their data is meant to be read somewhere else, these tests are
+looking in the wrong place and should be pointed at that surface instead.
 
 ## Project layout
 

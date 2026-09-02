@@ -51,9 +51,14 @@ test.describe('RTC plant data', () => {
     let populated = 0;
 
     for (const frequency of FREQUENCIES) {
+      // The worksheet definition draws the grid long before the values arrive,
+      // so counting straight after the frequency change reports a populated
+      // worksheet as empty. Subscribe before switching, then wait for the data.
+      const loaded = worksheet.waitForRowData();
       await worksheet.selectFrequency(frequency);
+      await loaded;
 
-      const count = await worksheet.populatedCellCountForToday(
+      const count = await worksheet.settledPopulatedCellCountForToday(
         frequency === 'Daily',
       );
       populated += count;

@@ -174,23 +174,62 @@ export class WorksheetPage {
     '15 Minute',
   ] as const;
 
-  /** Switch the worksheet to a different sampling frequency. */
+  /**
+   * Switch the worksheet to a different sampling frequency.
+   *
+   * The menu is retried as a whole. Angular Material re-renders the panel while
+   * it animates in, so a click issued the instant the option becomes visible
+   * lands on a node that is then detached — Playwright reports it as
+   * "element is not stable" and then "element was detached from the DOM".
+   * Waiting for the panel to settle first avoids most of that; retrying covers
+   * the rest.
+   */
   async selectFrequency(frequency: string): Promise<void> {
-    await this.page.locator('.ag-header-cell[col-id="window"]').first().click();
+    const header = this.page.locator('.ag-header-cell[col-id="window"]').first();
 
-    const option = this.page
-      .locator(
-        '[role="menuitem"], .mat-mdc-menu-item, mat-option, [role="option"]',
-      )
-      .filter({ hasText: new RegExp(`^\\s*${frequency}\\s*$`) })
-      .first();
-    await expect(option).toBeVisible({ timeout: 15_000 });
-    await option.click();
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      try {
+        await header.click();
 
-    await this.waitForReady();
-    await expect(
-      this.page.locator('.ag-header-cell[col-id="window"]').first(),
-    ).toContainText(frequency, { timeout: 30_000 });
+        const option = this.page
+          .locator(
+            '[role="menuitem"], .mat-mdc-menu-item, mat-option, [role="option"]',
+          )
+          .filter({ hasText: new RegExp(`^\\s*${frequency}\\s*$`) })
+          .first();
+        await expect(option).toBeVisible({ timeout: 15_000 });
+        // Let the open animation finish before clicking into it.
+        await this.page.waitForTimeout(400);
+        await option.click({ timeout: 10_000 });
+
+        await expect(header).toContainText(frequency, { timeout: 30_000 });
+        await this.waitForReady();
+        return;
+      } catch (error) {
+        if (attempt === 3) throw error;
+        // Dismiss whatever is left open before trying again.
+        await this.page.keyboard.press('Escape').catch(() => {});
+        await this.page.waitForTimeout(500);
+      }
+    }
+  }
+
+  /**
+   * Resolve once the worksheet has loaded its cell values.
+   *
+   * The grid renders its rows and columns from the worksheet *definition*,
+   * which arrives well before the values do. Counting populated cells between
+   * those two points reports a fully-populated worksheet as empty, so any read
+   * has to wait for this response rather than for the grid to appear.
+   */
+  waitForRowData(timeout = 60_000): Promise<unknown> {
+    return this.page.waitForResponse(
+      (response) =>
+        /\/spreadsheet\/v\d+\/.+\/worksheet\/.+\/rows\//i.test(
+          new URL(response.url()).pathname,
+        ) && response.ok(),
+      { timeout },
+    );
   }
 
   /**
@@ -202,6 +241,32 @@ export class WorksheetPage {
       .getByText(/^(?:[A-Z][a-z]{2,8} \d{1,2}, \d{4}|[A-Z][a-z]{2,8} \d{4})$/)
       .first();
     return (await label.innerText()).trim();
+  }
+
+  /**
+   * Count the populated cells representing today, once the grid has settled.
+   *
+   * Rendering lags the data response slightly, so this reads until two
+   * consecutive samples agree rather than trusting the first one.
+   */
+  async settledPopulatedCellCountForToday(
+    isDaily: boolean,
+    timeout = 15_000,
+  ): Promise<number> {
+    const deadline = Date.now() + timeout;
+    let count = await this.populatedCellCountForToday(isDaily);
+
+    // Values stream into the grid after the row response lands, so an early
+    // zero is indistinguishable from a genuinely empty worksheet. Cells never
+    // un-populate, which makes any non-zero reading conclusive immediately;
+    // only a zero has to be held for the full window before it is believed.
+    // Waiting for two equal readings instead would settle on the leading run
+    // of zeros and report populated worksheets as empty.
+    while (count === 0 && Date.now() < deadline) {
+      await this.page.waitForTimeout(500);
+      count = await this.populatedCellCountForToday(isDaily);
+    }
+    return count;
   }
 
   /**
