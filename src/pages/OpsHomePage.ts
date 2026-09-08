@@ -249,31 +249,47 @@ export class OpsHomePage {
    * failure rather than letting it be read as the target's data.
    */
   async gotoOperationWorksheet(operationId: string): Promise<string> {
-    await this.page.goto(`./plant/${operationId}/worksheet`, {
-      waitUntil: 'domcontentloaded',
-    });
-    await this.waitForAppReady();
-    // Generous: every navigation re-boots the SPA, which refetches the whole
-    // multi-megabyte operation hierarchy. Under concurrency that comfortably
-    // outruns the default navigation timeout.
-    await this.page.waitForURL(
-      new RegExp(`/plant/${operationId}/worksheet/`, 'i'),
-      { timeout: 120_000, waitUntil: 'commit' },
-    );
-    // The app keeps redirecting to the default view after the worksheet route
-    // matches. Reading the grid before that settles races the navigation and
-    // tears down the execution context mid-evaluate.
-    await this.waitForStableUrl();
+    const wanted = new RegExp(`/plant/${operationId}/worksheet/`, 'i');
+    let landed = '';
 
-    const landed = this.currentPlantId();
-    if (landed.toLowerCase() !== operationId.toLowerCase()) {
-      throw new Error(
-        `Navigating to operation ${operationId} landed on ${landed} instead. ` +
-          `The app redirects unresolvable deep links to the last-used ` +
-          `operation, so this reading would belong to the wrong plant.`,
-      );
+    // On a cold page the app restores the user's last context as it boots, and
+    // that restore can outrun the deep link — the URL ends up on the last-used
+    // operation instead of the requested one. Navigating again once the app is
+    // warm sticks, so the first attempt is treated as a boot rather than a
+    // failure.
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await this.page.goto(`./plant/${operationId}/worksheet`, {
+        waitUntil: 'domcontentloaded',
+      });
+      await this.waitForAppReady();
+
+      try {
+        // Generous: every navigation re-boots the SPA, which refetches the
+        // whole multi-megabyte operation hierarchy. Under concurrency that
+        // comfortably outruns the default navigation timeout.
+        await this.page.waitForURL(wanted, {
+          timeout: attempt === 1 ? 45_000 : 120_000,
+          waitUntil: 'commit',
+        });
+      } catch {
+        landed = this.currentPlantId();
+        continue;
+      }
+
+      // The app keeps redirecting to the default view after the worksheet route
+      // matches. Reading the grid before that settles races the navigation and
+      // tears down the execution context mid-evaluate.
+      await this.waitForStableUrl();
+
+      landed = this.currentPlantId();
+      if (landed.toLowerCase() === operationId.toLowerCase()) return landed;
     }
-    return landed;
+
+    throw new Error(
+      `Navigating to operation ${operationId} landed on ${landed} instead. ` +
+        `The app redirects unresolvable deep links to the last-used ` +
+        `operation, so this reading would belong to the wrong plant.`,
+    );
   }
 
   /** True when the current URL is scoped to a plant. */

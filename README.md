@@ -99,8 +99,8 @@ against one environment.
 ### Auditing a whole tenant
 
 `tests/full/rtc-tenant-audit.spec.ts` walks every operation under one tenant and
-reports which ones have data for today. It is read-only, but it targets seeded
-load-test tenants, so it lives in `full` rather than `smoke`.
+reports which ones have data. It is read-only, but it targets seeded load-test
+tenants, so it lives in `full` rather than `smoke`.
 
 ```bash
 npx playwright test --project=full tests/full/rtc-tenant-audit.spec.ts
@@ -110,6 +110,23 @@ It writes a Markdown report — operation name, sub-tenant, link, and whether da
 was found — to `test-results/rtc-tenant-audit.md`, and attaches it to the HTML
 report. The test fails if any operation lacks data, and the failure message
 names the first twenty.
+
+#### Which date each frequency is checked against
+
+The two frequencies become complete at different times, so checking both against
+"today" reports healthy plants as broken:
+
+- **Daily is checked against yesterday.** A daily value is an aggregate of the
+  whole day's inputs, so it cannot be complete until the day is over. Today's
+  row is legitimately empty for the entire day.
+- **15 Minute is checked against today**, but only for slots that have closed
+  *and* had time to settle. A value appears roughly a slot-length after its
+  period ends, so `WorksheetPage.SLOT_MINUTES + SETTLE_MINUTES` (30 minutes) is
+  subtracted from the current time and anything later is ignored. The slot in
+  progress and the one that just closed are expected to be empty.
+
+The report states both dates explicitly, and each row shows the date or slot
+range behind its verdict, so a result can be checked without re-reading the code.
 
 Environment variables let it be pointed elsewhere without editing the spec:
 
@@ -132,6 +149,13 @@ A few things about it are worth knowing:
   operation the user was last on*, and still renders a healthy worksheet, so the
   numbers would quietly belong to the wrong plant. `gotoOperationWorksheet()`
   asserts the landed GUID for exactly this reason.
+- **A cold page loses the first deep link.** On a freshly opened page the app
+  restores the user's last context while booting, and that restore can outrun
+  the deep link — you land on the previous operation instead. Navigating again
+  once the app is warm sticks, so `gotoOperationWorksheet()` retries rather than
+  treating the first landing as final. This only shows up when the last-used
+  operation differs from the one being requested, which is why it can lie
+  dormant for a whole run and then fail everything.
 - **"Could not be read" is not "no data".** Every navigation re-boots the SPA and
   refetches several megabytes of hierarchy, which occasionally times out. Those
   operations are retried, then reported separately — calling them empty would
@@ -143,6 +167,10 @@ A few things about it are worth knowing:
   trusted once it has held for that long — see the value-load race under [known
   issues](#known-issues-found-while-writing-these-tests). Without that hold the
   audit is not reproducible, so the time is not optional.
+- **The 15 Minute grid is virtualised.** A day holds 96 slots but only a
+  screenful exists in the DOM, so the scan pages through the grid. It stops at
+  the first populated slot, which keeps "has data" fast while making "no data"
+  rest on the whole day rather than one screenful.
 
 ### Picking an operation
 
@@ -231,7 +259,7 @@ Two things together make the reading trustworthy:
 1. `waitForRowData()` waits for the `.../worksheet/N/rows/...` response, and must
    be subscribed to *before* the action that triggers it (the navigation, or the
    frequency change).
-2. `settledPopulatedCellCountForToday()` treats the two outcomes asymmetrically.
+2. `settledPopulatedCellCountForDate()` treats the two outcomes asymmetrically.
    Cells never un-populate, so any non-zero count is conclusive immediately,
    while a zero is only believed once it has held for a full 15-second window.
    Polling for two *equal* consecutive readings — the obvious approach — is
@@ -241,13 +269,21 @@ Two things together make the reading trustworthy:
 Note also that the worksheet number in that URL identifies the frequency, not
 the plant: `worksheet/4` is Daily and `worksheet/1` is 15 Minute.
 
-**RTC load-test plants: data depends on the tenant.** Under
-`RtcLpt-Root-2026-08-26 17:23:03Z` most `RTCPlant with 3000 RTC params without
-dashboard #N` operations do have data for today, but only on the **15 Minute**
-worksheet — Daily reads zero everywhere, consistently, and it is worth
-confirming with the fixture owners that this is intended rather than a gap in
-the seeding job. Earlier `RtcLpt-Root-*` tenants sampled by
-`tests/full/rtc-plant-data.spec.ts` were empty on both frequencies.
+**RTC load-test plants: the seeded data is sparse and appears to have stopped.**
+Under `RtcLpt-Root-2026-08-26 17:23:03Z`, coverage differs per plant and per
+frequency, so a failing operation here is more likely a gap in the seeding job
+than a bug in the app. Two observations worth carrying forward:
+
+- Reading a plant's whole Daily month shows values on **one day only** rather
+  than every day, and the 15 Minute worksheet that carried values in early
+  September now reads zero for every closed slot. Whatever produces this data
+  does not appear to be running continuously.
+- Because of that, the pass/fail split moves as the fixtures age. Treat the
+  numbers in any given run as a snapshot, not as the expected shape, and confirm
+  with the fixture owners before reading a failure as a product defect.
+
+Earlier `RtcLpt-Root-*` tenants sampled by `tests/full/rtc-plant-data.spec.ts`
+were empty on both frequencies.
 
 Also unexplained: the worksheet exposes only nine parameters when the operation
 is named for 3000. The RTC parameters do not appear in the default worksheet
