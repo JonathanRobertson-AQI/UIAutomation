@@ -221,15 +221,24 @@ export class WorksheetPage {
    * which arrives well before the values do. Counting populated cells between
    * those two points reports a fully-populated worksheet as empty, so any read
    * has to wait for this response rather than for the grid to appear.
+   *
+   * Callers must subscribe *before* the action that triggers the load, which
+   * means an action that throws leaves this promise pending and unawaited. It
+   * then rejects on its own when the page closes or the timeout expires, and an
+   * unhandled rejection fails the entire run rather than the one operation. The
+   * no-op handler below marks the promise as handled without consuming the
+   * rejection, so callers that do await it still see the error.
    */
   waitForRowData(timeout = 60_000): Promise<unknown> {
-    return this.page.waitForResponse(
+    const pending = this.page.waitForResponse(
       (response) =>
         /\/spreadsheet\/v\d+\/.+\/worksheet\/.+\/rows\//i.test(
           new URL(response.url()).pathname,
         ) && response.ok(),
       { timeout },
     );
+    pending.catch(() => undefined);
+    return pending;
   }
 
   /**

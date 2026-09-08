@@ -178,7 +178,19 @@ async function auditOperation(
       };
     } catch (error) {
       lastError = (error as Error).message.split('\n')[0];
-      if (attempt < ATTEMPTS) await renew();
+      if (attempt < ATTEMPTS) {
+        // Rebuilding a lane launches a browser, which can itself fail when the
+        // machine is under load. That must not abort the audit: this lane's
+        // operation is simply unreadable, and the run continues.
+        try {
+          await renew();
+        } catch (renewError) {
+          lastError =
+            `${lastError} (lane could not be rebuilt: ` +
+            `${(renewError as Error).message.split('\n')[0]})`;
+          break;
+        }
+      }
     }
   }
 
@@ -336,9 +348,25 @@ test.describe('RTC tenant data audit', () => {
     }
 
     const openLane = async (): Promise<Lane> => {
-      const browser = await chromium.launch();
-      const laneContext = await browser.newContext({ storageState });
-      return { browser, context: laneContext, page: await laneContext.newPage() };
+      // Launching can fail transiently when several browsers are being torn
+      // down and rebuilt at once, so give it a couple of tries before letting
+      // the failure reach the caller.
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const browser = await chromium.launch();
+          const laneContext = await browser.newContext({ storageState });
+          return {
+            browser,
+            context: laneContext,
+            page: await laneContext.newPage(),
+          };
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+        }
+      }
+      throw lastError;
     };
 
     const lanes: Lane[] = await Promise.all(
@@ -347,12 +375,17 @@ test.describe('RTC tenant data audit', () => {
     const uses = new Array(lanes.length).fill(0);
 
     const renew = async (slot: number) => {
+      // The replacement is opened before the old lane is discarded, so a failed
+      // launch leaves the lane exactly as it was rather than holding a closed
+      // browser that every later operation would fail against.
+      const replacement = await openLane();
+      const previous = lanes[slot];
+      lanes[slot] = replacement;
+      uses[slot] = 0;
       // Closing the context first lets a healthy browser shut down cleanly;
       // both are best-effort because a crashed lane has nothing left to close.
-      await lanes[slot].context.close().catch(() => undefined);
-      await lanes[slot].browser.close().catch(() => undefined);
-      lanes[slot] = await openLane();
-      uses[slot] = 0;
+      await previous.context.close().catch(() => undefined);
+      await previous.browser.close().catch(() => undefined);
     };
 
     let completed = 0;
@@ -366,7 +399,11 @@ test.describe('RTC tenant data audit', () => {
           // of hierarchy, and the renderer does not give all of it back. Left
           // alone, a lane dies partway through a 150-operation run, so lanes
           // are rebuilt periodically rather than waiting for that.
-          if (uses[slot] >= RECYCLE_AFTER) await renew(slot);
+          if (uses[slot] >= RECYCLE_AFTER) {
+            // A scheduled rebuild that fails is not worth losing the run over;
+            // the lane keeps its current browser and tries again next time.
+            await renew(slot).catch(() => undefined);
+          }
           uses[slot] += 1;
 
           const result = await auditOperation(

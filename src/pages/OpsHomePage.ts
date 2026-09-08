@@ -42,12 +42,21 @@ export class OpsHomePage {
    * the section, then the specific record — which completes well after the
    * shell has rendered. Clicking during that window gets silently undone by
    * the pending navigation, so tests must let it finish first.
+   *
+   * There may be nothing to restore: a session with no last-used operation
+   * simply stays on the home route. That is a legitimate boot, so the plant
+   * redirect is waited for but not required — what matters to every caller is
+   * that navigation has stopped, which the stability wait below guarantees
+   * either way. Callers that need a specific operation navigate to it and
+   * assert the landed route themselves.
    */
   async waitForContextRestored(): Promise<void> {
-    await this.page.waitForURL(
-      new RegExp(`/plant/${GUID_PATTERN.source}/`, 'i'),
-      { timeout: 60_000, waitUntil: 'commit' },
-    );
+    await this.page
+      .waitForURL(new RegExp(`/plant/${GUID_PATTERN.source}/`, 'i'), {
+        timeout: 30_000,
+        waitUntil: 'commit',
+      })
+      .catch(() => undefined);
     await this.waitForStableUrl();
   }
 
