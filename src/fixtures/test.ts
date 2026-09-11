@@ -2,11 +2,13 @@ import { test as base, expect } from '@playwright/test';
 import { LoginPage } from '../pages/LoginPage';
 import { OpsHomePage } from '../pages/OpsHomePage';
 import { WorksheetPage } from '../pages/WorksheetPage';
+import { SampleManagerPage } from '../pages/SampleManagerPage';
 
 type Fixtures = {
   loginPage: LoginPage;
   opsHome: OpsHomePage;
   worksheet: WorksheetPage;
+  sampleManager: SampleManagerPage;
 };
 
 /**
@@ -26,6 +28,10 @@ export const test = base.extend<Fixtures>({
 
   worksheet: async ({ page }, use) => {
     await use(new WorksheetPage(page));
+  },
+
+  sampleManager: async ({ page }, use) => {
+    await use(new SampleManagerPage(page));
   },
 });
 

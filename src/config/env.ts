@@ -38,4 +38,35 @@ export const env = {
   get worksheetName(): string | undefined {
     return process.env.TEST_WORKSHEET_NAME || undefined;
   },
+
+  /**
+   * Sample Manager fixture, used by the AQI-11578 custom-observation tests.
+   *
+   * Unlike the rest of the suite these cannot navigate purely by name: the
+   * behaviour under test only exists when an analyte is linked to a Rio
+   * parameter that defines custom observations, which is a specific piece of
+   * per-operation configuration rather than something any plant has. The
+   * defaults point at the operation set up for this epic on feature-us.
+   */
+  sampleManager: {
+    /** Operation GUID whose Sample Manager has a text analyte configured. */
+    get plantId(): string {
+      return (
+        process.env.SAMPLE_MANAGER_PLANT_ID ??
+        '5e1f8cef-ec33-47a4-b924-e825bcfe6e79'
+      );
+    },
+    /** A text analyte linked to a custom-observation parameter. */
+    get textAnalyte(): string {
+      return process.env.SAMPLE_MANAGER_TEXT_ANALYTE ?? "Just Kidding It's Text";
+    },
+    /** A sample on the current week carrying that analyte. */
+    get sampleName(): string {
+      return process.env.SAMPLE_MANAGER_SAMPLE_NAME ?? 'Ad hoc Test again';
+    },
+    /** One of the custom observations configured on that analyte. */
+    get customObservation(): string {
+      return process.env.SAMPLE_MANAGER_CUSTOM_OBSERVATION ?? 'Please';
+    },
+  },
 };
