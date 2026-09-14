@@ -32,25 +32,13 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   // ------------------------------------------------------------------------
 
   /**
-   * Marked `fail` deliberately.
-   *
-   * As of this run the feature environment serves the plain ag-Grid text
-   * editor for the by-test `result` column - `aqi-analyte-result-cell-editor`
-   * is not registered on it at all - while the very same analyte does get the
-   * autocomplete on Enter sample results. AQI-11578 is still in Code Review,
-   * so this is "not deployed yet" rather than a defect in shipped code.
-   *
-   * Keeping the assertion truthful and annotating it means CI stays green
-   * today *and* turns red the moment the feature lands, at which point this
-   * annotation is the only line that needs deleting.
+   * The criterion AQI-11578 delivers. Confirmed live on feature-us on
+   * 14 Sep 2026: the column now registers `aqi-analyte-result-cell-editor`,
+   * which renders `aqi-custom-observation-select`.
    */
   test(`the Result cell offers a custom observation dropdown`, async ({
     sampleManager,
   }) => {
-    // Scoped to this test only - a bare `test.fail()` in the describe body
-    // would silently invert every assertion in the file.
-    test.fail();
-
     await sampleManager.openEnterResultsByTest(textAnalyte);
 
     const cell = sampleManager.resultCell(0);
@@ -70,8 +58,149 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     );
   });
 
+  /**
+   * Spec task 8. This grid sets `singleClickEdit: true`, which the Enter
+   * sample results grid does not, so the editor has to open and take focus on
+   * the very first click without the overlay immediately dismissing itself.
+   */
+  test('the editor opens and takes focus on a single click', async ({
+    sampleManager,
+  }) => {
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+
+    const cell = sampleManager.resultCell(0);
+    const input = await sampleManager.openEditorWithSingleClick(cell);
+
+    expect(await sampleManager.hasCustomObservationEditor(cell)).toBe(true);
+    await input.fill('');
+    await expect(sampleManager.options.first()).toBeVisible({
+      timeout: 15_000,
+    });
+  });
+
+  /**
+   * Spec task 7, the headline trap.
+   *
+   * `gridOptions` sets `stopEditingWhenCellsLoseFocus: true`, and the
+   * `mat-autocomplete` panel renders in a CDK overlay on the document body -
+   * outside the ag-Grid cell. A mouse click on an option can therefore read as
+   * the cell losing focus, making ag-Grid stop editing and discard the pick
+   * before it commits. Keyboard selection never leaves the cell, so it cannot
+   * catch this; the mouse path has to be exercised explicitly.
+   *
+   * The cell is seeded with a distinct off-list value first, so a discarded
+   * selection shows up as the seed rather than as a coincidental match.
+   */
+  test('an option chosen with the mouse survives the overlay closing', async ({
+    sampleManager,
+  }) => {
+    const seed = `Seed ${Date.now() % 100000}`;
+
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+    const cell = sampleManager.resultCell(0);
+
+    const seedInput = await sampleManager.openEditor(cell);
+    await seedInput.fill(seed);
+    await sampleManager.commitEditor(cell);
+    expect(await sampleManager.readValue(cell)).toBe(seed);
+
+    const input = await sampleManager.openEditor(cell);
+    await input.fill('');
+    await expect(sampleManager.options.first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await sampleManager.options.first().click();
+    await sampleManager.commitEditor(cell);
+
+    expect(
+      await sampleManager.readValue(cell),
+      'the mouse-selected option was discarded when the overlay closed',
+    ).toBe(customObservation);
+
+    await sampleManager.saveByTest();
+    await sampleManager.gotoSchedule(plantId);
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+
+    expect(await sampleManager.readValue(sampleManager.resultCell(0))).toBe(
+      customObservation,
+    );
+  });
+
+  test('an option chosen with the keyboard commits and saves', async ({
+    page,
+    sampleManager,
+  }) => {
+    const seed = `Seed ${Date.now() % 100000}`;
+
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+    const cell = sampleManager.resultCell(0);
+
+    const seedInput = await sampleManager.openEditor(cell);
+    await seedInput.fill(seed);
+    await sampleManager.commitEditor(cell);
+
+    const input = await sampleManager.openEditor(cell);
+    await input.fill('');
+    await expect(sampleManager.options.first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.keyboard.press('ArrowDown');
+    await page.keyboard.press('Enter');
+    await sampleManager.commitEditor(cell);
+
+    expect(await sampleManager.readValue(cell)).toBe(customObservation);
+
+    await sampleManager.saveByTest();
+    await sampleManager.gotoSchedule(plantId);
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+
+    expect(await sampleManager.readValue(sampleManager.resultCell(0))).toBe(
+      customObservation,
+    );
+  });
+
+  /**
+   * "No row picks up another row's value."
+   *
+   * This screen renders one row per sample in the test, and the same analyte
+   * twin repeats across all of them. The spec's guidance resolves valid values
+   * once per *distinct* twin and fans the result out, which is exactly the
+   * shape of change that can leak one row's edit into its siblings. Skipped
+   * when the schedule only produced a single row.
+   */
+  test('values on sibling rows stay independent', async ({ sampleManager }) => {
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+
+    const rows = await sampleManager.rowIndices();
+    test.skip(rows.length < 2, 'needs a test with at least two samples');
+
+    const values = rows.map(
+      (_, i) => `Row${i} ${Date.now() % 100000}`,
+    );
+
+    for (const [i, rowIndex] of rows.entries()) {
+      const cell = sampleManager.cell(Number(rowIndex), 'result');
+      const input = await sampleManager.openEditor(cell);
+      await input.fill(values[i]);
+      await sampleManager.commitEditor(cell);
+    }
+
+    await sampleManager.saveByTest();
+    await sampleManager.gotoSchedule(plantId);
+    await sampleManager.openEnterResultsByTest(textAnalyte);
+
+    for (const [i, rowIndex] of rows.entries()) {
+      expect(
+        await sampleManager.readValue(
+          sampleManager.cell(Number(rowIndex), 'result'),
+        ),
+        `row ${rowIndex} should keep its own value`,
+      ).toBe(values[i]);
+    }
+  });
+
   // ------------------------------------------------------------------------
-  // Cross-screen reference behaviour. Enter sample results already ships the
+  // Cross-screen reference behaviour. Enter sample results already shipped the
   // dropdown, so this is both a regression guard and the baseline the by-test
   // screen has to match.
   // ------------------------------------------------------------------------
@@ -121,6 +250,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     const input = await sampleManager.openEditor(cell);
     await input.fill(customObservation.toLowerCase());
     await input.press('Enter');
+    await sampleManager.commitEditor(cell);
 
     await expect
       .poll(() => sampleManager.readValue(cell), { timeout: 15_000 })
@@ -144,6 +274,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     const input = await sampleManager.openEditor(cell);
     await input.fill(value);
     await input.press('Enter');
+    await sampleManager.commitEditor(cell);
     await sampleManager.saveByTest();
 
     await sampleManager.gotoSchedule(plantId);
@@ -173,6 +304,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     const input = await sampleManager.openEditor(cell);
     await input.fill(payload);
     await input.press('Enter');
+    await sampleManager.commitEditor(cell);
     await sampleManager.saveByTest();
 
     await sampleManager.gotoSchedule(plantId);
@@ -209,6 +341,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     const input = await sampleManager.openEditor(byTestCell);
     await input.fill(value);
     await input.press('Enter');
+    await sampleManager.commitEditor(byTestCell);
     await sampleManager.saveByTest();
 
     await sampleManager.gotoSchedule(plantId);
