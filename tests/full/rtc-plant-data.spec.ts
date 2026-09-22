@@ -1,4 +1,5 @@
 import { expect, test } from '../../src/fixtures/test';
+import { WorksheetPage } from '../../src/pages/WorksheetPage';
 
 /**
  * Checks that a randomly chosen RTC load-test plant has data recorded for
@@ -49,6 +50,7 @@ test.describe('RTC plant data', () => {
 
     const findings: string[] = [];
     let populated = 0;
+    const now = new Date();
 
     for (const frequency of FREQUENCIES) {
       // The worksheet definition draws the grid long before the values arrive,
@@ -58,13 +60,28 @@ test.describe('RTC plant data', () => {
       await worksheet.selectFrequency(frequency);
       await loaded;
 
-      const count = await worksheet.settledPopulatedCellCountForToday(
-        frequency === 'Daily',
-      );
-      populated += count;
+      // Daily is an aggregate of the whole day, so it cannot be complete until
+      // the day is over — it is checked against yesterday. 15 Minute is checked
+      // against today, but only for slots old enough to have settled.
+      if (frequency === 'Daily') {
+        const yesterday = WorksheetPage.yesterday(now);
+        const count = await worksheet.settledPopulatedCellCountForDate(
+          yesterday,
+        );
+        populated += count;
+        findings.push(
+          `Daily ${WorksheetPage.formatDate(yesterday)} ` +
+            `(showing ${await worksheet.periodLabel()}): ${count} populated cell(s)`,
+        );
+        continue;
+      }
 
+      const { populated: count, expectedSlots } =
+        await worksheet.closedSlotReading(now);
+      populated += count;
       findings.push(
-        `${frequency} (showing ${await worksheet.periodLabel()}): ${count} populated cell(s)`,
+        `${frequency} today, ${expectedSlots} settled slot(s) ` +
+          `(showing ${await worksheet.periodLabel()}): ${count} populated cell(s)`,
       );
     }
 

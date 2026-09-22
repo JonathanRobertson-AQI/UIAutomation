@@ -221,15 +221,24 @@ export class WorksheetPage {
    * which arrives well before the values do. Counting populated cells between
    * those two points reports a fully-populated worksheet as empty, so any read
    * has to wait for this response rather than for the grid to appear.
+   *
+   * Callers must subscribe *before* the action that triggers the load, which
+   * means an action that throws leaves this promise pending and unawaited. It
+   * then rejects on its own when the page closes or the timeout expires, and an
+   * unhandled rejection fails the entire run rather than the one operation. The
+   * no-op handler below marks the promise as handled without consuming the
+   * rejection, so callers that do await it still see the error.
    */
   waitForRowData(timeout = 60_000): Promise<unknown> {
-    return this.page.waitForResponse(
+    const pending = this.page.waitForResponse(
       (response) =>
         /\/spreadsheet\/v\d+\/.+\/worksheet\/.+\/rows\//i.test(
           new URL(response.url()).pathname,
         ) && response.ok(),
       { timeout },
     );
+    pending.catch(() => undefined);
+    return pending;
   }
 
   /**
@@ -243,58 +252,233 @@ export class WorksheetPage {
     return (await label.innerText()).trim();
   }
 
+  /** Length of one slot on the 15 Minute frequency. */
+  static readonly SLOT_MINUTES = 15;
+
   /**
-   * Count the populated cells representing today, once the grid has settled.
+   * How long after a slot closes before its value is expected to appear.
    *
-   * Rendering lags the data response slightly, so this reads until two
-   * consecutive samples agree rather than trusting the first one.
+   * Values are written up to roughly a slot-length after the period ends, so a
+   * slot that has only just closed being empty is normal rather than a finding.
    */
-  async settledPopulatedCellCountForToday(
-    isDaily: boolean,
-    timeout = 15_000,
+  static readonly SETTLE_MINUTES = 15;
+
+  /** The most recent slot start that should already have a value. */
+  static latestExpectedSlotStart(now = new Date()): Date {
+    return new Date(
+      now.getTime() -
+        (WorksheetPage.SLOT_MINUTES + WorksheetPage.SETTLE_MINUTES) * 60_000,
+    );
+  }
+
+  /** Yesterday, the most recent day whose daily aggregate can be complete. */
+  static yesterday(now = new Date()): Date {
+    const date = new Date(now);
+    date.setDate(date.getDate() - 1);
+    return date;
+  }
+
+  /**
+   * Re-read a count until it settles.
+   *
+   * Values stream into the grid after the row response lands, so an early zero
+   * is indistinguishable from a genuinely empty worksheet. Cells never
+   * un-populate, which makes any non-zero reading conclusive immediately; only
+   * a zero has to be held for the full window before it is believed. Waiting
+   * for two equal readings instead would settle on the leading run of zeros
+   * and report populated worksheets as empty.
+   */
+  private async settled(
+    read: () => Promise<number>,
+    timeout: number,
   ): Promise<number> {
     const deadline = Date.now() + timeout;
-    let count = await this.populatedCellCountForToday(isDaily);
+    let count = await read();
 
-    // Values stream into the grid after the row response lands, so an early
-    // zero is indistinguishable from a genuinely empty worksheet. Cells never
-    // un-populate, which makes any non-zero reading conclusive immediately;
-    // only a zero has to be held for the full window before it is believed.
-    // Waiting for two equal readings instead would settle on the leading run
-    // of zeros and report populated worksheets as empty.
     while (count === 0 && Date.now() < deadline) {
       await this.page.waitForTimeout(500);
-      count = await this.populatedCellCountForToday(isDaily);
+      count = await read();
     }
     return count;
   }
 
   /**
-   * Count the populated cells representing today.
-   *
-   * On the daily frequency only today's row counts. The intra-day frequencies
-   * already scope the whole grid to a single day, so every row is in play.
+   * Move the grid back one period — a month on Daily, a day on the intra-day
+   * frequencies.
    */
-  async populatedCellCountForToday(isDaily: boolean): Promise<number> {
-    if (!isDaily) {
-      return this.page.evaluate(
-        () =>
-          Array.from(
-            document.querySelectorAll('.ag-center-cols-container .ag-cell'),
-          ).filter((cell) => (cell as HTMLElement).innerText.trim()).length,
-      );
+  async showPreviousPeriod(): Promise<void> {
+    const loaded = this.waitForRowData().catch(() => undefined);
+    await this.page.getByRole('button', { name: 'Previous' }).first().click();
+    await loaded;
+    await this.waitForReady();
+  }
+
+  /**
+   * Scroll the daily grid back until it is showing the month containing `date`.
+   *
+   * Daily lists one row per day of the displayed month, so yesterday is already
+   * on screen except on the first of the month, when it belongs to the previous
+   * one.
+   */
+  async ensureMonthShown(date: Date): Promise<void> {
+    const wanted = date.toLocaleDateString('en-US', {
+      month: 'long',
+      year: 'numeric',
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if ((await this.periodLabel()) === wanted) return;
+      await this.showPreviousPeriod();
     }
 
-    const today = WorksheetPage.formatDate(new Date());
-    const rowIndex = await this.rowIndexForDate(today);
-    return this.page.evaluate(
-      (index) =>
-        Array.from(
-          document.querySelectorAll(
-            `.ag-center-cols-container .ag-row[row-index="${index}"] .ag-cell`,
-          ),
-        ).filter((cell) => (cell as HTMLElement).innerText.trim()).length,
-      rowIndex,
+    if ((await this.periodLabel()) !== wanted) {
+      throw new Error(
+        `Worksheet is showing "${await this.periodLabel()}", expected "${wanted}"`,
+      );
+    }
+  }
+
+  /** Count the populated cells in the daily row for `date`, once settled. */
+  async settledPopulatedCellCountForDate(
+    date: Date,
+    timeout = 15_000,
+  ): Promise<number> {
+    await this.ensureMonthShown(date);
+    const rowIndex = await this.rowIndexForDate(WorksheetPage.formatDate(date));
+
+    return this.settled(
+      () =>
+        this.page.evaluate(
+          (index) =>
+            Array.from(
+              document.querySelectorAll(
+                `.ag-center-cols-container .ag-row[row-index="${index}"] .ag-cell`,
+              ),
+            ).filter((cell) => (cell as HTMLElement).innerText.trim()).length,
+          rowIndex,
+        ),
+      timeout,
     );
+  }
+
+  /**
+   * Count populated cells on an intra-day frequency, ignoring slots too recent
+   * to have a value yet.
+   *
+   * The grid holds 96 rows for a day but virtualises them, so only a screenful
+   * exists in the DOM at a time. Finding data anywhere is enough to answer
+   * "does this have data", so the scan stops at the first populated slot and
+   * only pages through the whole day when it has found nothing — which keeps
+   * the common case fast without letting a "no data" verdict rest on one
+   * screenful.
+   */
+  async closedSlotReading(
+    now = new Date(),
+    timeout = 15_000,
+  ): Promise<{ populated: number; expectedSlots: number }> {
+    const cutoff = WorksheetPage.latestExpectedSlotStart(now);
+    const cutoffMinutes = cutoff.getHours() * 60 + cutoff.getMinutes();
+
+    // The grid is scoped to one day; only limit by time when that day is today.
+    const showingToday =
+      (await this.periodLabel()) ===
+      now.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+    const limit = showingToday ? cutoffMinutes : 24 * 60;
+
+    const viewport = this.page.locator('.ag-body-viewport').first();
+    await viewport.evaluate((element) => {
+      element.scrollTop = 0;
+    });
+
+    const seen = new Map<number, number>();
+    let populated = 0;
+
+    for (let screen = 0; screen < 12; screen += 1) {
+      const rows = await this.settledRowScan(limit, timeout, screen === 0);
+
+      for (const row of rows.slots) seen.set(row.minutes, row.populated);
+      populated = [...seen.values()].reduce((sum, n) => sum + n, 0);
+      if (populated > 0) break;
+
+      const atBottom = await viewport.evaluate((element) => {
+        const before = element.scrollTop;
+        element.scrollTop += element.clientHeight * 0.8;
+        return element.scrollTop === before;
+      });
+      if (atBottom) break;
+      await this.page.waitForTimeout(200);
+    }
+
+    const expectedSlots = [...seen.keys()].length;
+    return { populated, expectedSlots };
+  }
+
+  /**
+   * Read the currently rendered intra-day rows, counting only slots at or
+   * before `limitMinutes`.
+   */
+  private async settledRowScan(
+    limitMinutes: number,
+    timeout: number,
+    allowSettle: boolean,
+  ): Promise<{ slots: { minutes: number; populated: number }[] }> {
+    const read = () =>
+      this.page.evaluate((limit) => {
+        const toMinutes = (text: string): number | null => {
+          const match = text.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+          if (!match) return null;
+          let hours = Number(match[1]);
+          const minutes = Number(match[2]);
+          const meridiem = match[3]?.toUpperCase();
+          if (meridiem === 'PM' && hours !== 12) hours += 12;
+          if (meridiem === 'AM' && hours === 12) hours = 0;
+          return hours * 60 + minutes;
+        };
+
+        const populatedByIndex = new Map<string, number>();
+        document
+          .querySelectorAll('.ag-center-cols-container .ag-row')
+          .forEach((row) => {
+            populatedByIndex.set(
+              row.getAttribute('row-index') ?? '?',
+              Array.from(row.querySelectorAll('.ag-cell')).filter((cell) =>
+                (cell as HTMLElement).innerText.trim(),
+              ).length,
+            );
+          });
+
+        const slots: { minutes: number; populated: number }[] = [];
+        document
+          .querySelectorAll('.ag-pinned-left-cols-container .ag-row')
+          .forEach((row) => {
+            const minutes = toMinutes((row as HTMLElement).innerText.trim());
+            if (minutes === null || minutes > limit) return;
+            slots.push({
+              minutes,
+              populated:
+                populatedByIndex.get(row.getAttribute('row-index') ?? '?') ?? 0,
+            });
+          });
+        return { slots };
+      }, limitMinutes);
+
+    if (!allowSettle) return read();
+
+    // Only the first screenful waits out the value-load lag; later ones are
+    // scrolled into an already-loaded grid.
+    const deadline = Date.now() + timeout;
+    let result = await read();
+    while (
+      result.slots.every((slot) => slot.populated === 0) &&
+      Date.now() < deadline
+    ) {
+      await this.page.waitForTimeout(500);
+      result = await read();
+    }
+    return result;
   }
 }

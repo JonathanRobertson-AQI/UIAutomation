@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { Page } from '@playwright/test';
+import { chromium, type Browser, type BrowserContext, type Page } from '@playwright/test';
 import { test, expect } from '../../src/fixtures/test';
 import {
   OperationDirectory,
@@ -42,6 +42,8 @@ interface Reading {
   frequency: string;
   /** The period the grid was showing, e.g. `September 2026` or `Sep 1, 2026`. */
   period: string;
+  /** The date or slot range the reading covers, for the report. */
+  target: string;
   populatedCells: number;
 }
 
@@ -64,15 +66,34 @@ interface AuditResult {
 const ATTEMPTS = 3;
 
 /**
- * Replace a lane's page after this many operations, to cap the memory each one
- * accumulates across repeated SPA boots.
+ * Rebuild a lane's browser after this many operations, to cap the memory each
+ * one accumulates across repeated SPA boots.
+ *
+ * Recycling the *page* is not enough. Much of what a boot allocates is held by
+ * the browser process rather than the page, so closing pages alone lets a run
+ * climb until the process is killed and every remaining lane dies with it. The
+ * whole browser is therefore torn down, which is the only thing that reliably
+ * hands the memory back to the OS.
  */
-const RECYCLE_AFTER = 25;
+const RECYCLE_AFTER = 10;
 
-/** Read one operation's worksheets and count cells dated today. */
+/**
+ * Read one operation's worksheets and count the cells that should hold values.
+ *
+ * The two frequencies are checked against different dates, because they become
+ * complete at different times:
+ *
+ * - **Daily** is an aggregate of a whole day's inputs, so it cannot be complete
+ *   until the day is over. It is checked against *yesterday*; today's row being
+ *   empty is expected, not a finding.
+ * - **15 Minute** is checked against *today*, but only for slots that have
+ *   closed and had time to settle. The slot in progress, and the one that just
+ *   ended, are legitimately empty.
+ */
 async function readOperation(
   page: Page,
   operation: Operation,
+  now = new Date(),
 ): Promise<Reading[]> {
   const opsHome = new OpsHomePage(page);
   const worksheet = new WorksheetPage(page);
@@ -88,17 +109,36 @@ async function readOperation(
   await dailyLoaded;
 
   for (const frequency of FREQUENCIES) {
-    const isDaily = frequency === 'Daily';
-    if (!isDaily) {
+    if (frequency !== 'Daily') {
       const loaded = worksheet.waitForRowData();
       await worksheet.selectFrequency(frequency);
       await loaded;
     }
 
+    if (frequency === 'Daily') {
+      const yesterday = WorksheetPage.yesterday(now);
+      readings.push({
+        frequency,
+        period: await worksheet.periodLabel(),
+        target: WorksheetPage.formatDate(yesterday),
+        populatedCells:
+          await worksheet.settledPopulatedCellCountForDate(yesterday),
+      });
+      continue;
+    }
+
+    const { populated, expectedSlots } = await worksheet.closedSlotReading(now);
+    const cutoff = WorksheetPage.latestExpectedSlotStart(now);
     readings.push({
       frequency,
       period: await worksheet.periodLabel(),
-      populatedCells: await worksheet.settledPopulatedCellCountForToday(isDaily),
+      target:
+        `${expectedSlots} slot(s) up to ` +
+        cutoff.toLocaleTimeString('en-US', {
+          hour: 'numeric',
+          minute: '2-digit',
+        }),
+      populatedCells: populated,
     });
   }
   return readings;
@@ -138,7 +178,19 @@ async function auditOperation(
       };
     } catch (error) {
       lastError = (error as Error).message.split('\n')[0];
-      if (attempt < ATTEMPTS) await renew();
+      if (attempt < ATTEMPTS) {
+        // Rebuilding a lane launches a browser, which can itself fail when the
+        // machine is under load. That must not abort the audit: this lane's
+        // operation is simply unreadable, and the run continues.
+        try {
+          await renew();
+        } catch (renewError) {
+          lastError =
+            `${lastError} (lane could not be rebuilt: ` +
+            `${(renewError as Error).message.split('\n')[0]})`;
+          break;
+        }
+      }
     }
   }
 
@@ -182,7 +234,10 @@ function buildReport(results: AuditResult[], generatedAt: Date): string {
     const counts = result.error
       ? `error: ${result.error}`
       : result.readings
-          .map((r) => `${r.frequency} (${r.period}): ${r.populatedCells}`)
+          .map(
+            (r) =>
+              `${r.frequency} — ${r.target} (grid: ${r.period}): ${r.populatedCells}`,
+          )
           .join('<br>');
     return (
       `| ${result.operation.name} | ${result.operation.parentName} | ` +
@@ -193,18 +248,27 @@ function buildReport(results: AuditResult[], generatedAt: Date): string {
   const table = (rows: AuditResult[], emptyNote: string) =>
     rows.length
       ? [
-          '| Operation | Sub-tenant | Link | Has data today | Populated cells |',
+          '| Operation | Sub-tenant | Link | Has data | Populated cells |',
           '| --- | --- | --- | --- | --- |',
           ...rows.map(row),
         ].join('\n')
       : emptyNote;
+
+  const yesterday = WorksheetPage.yesterday(generatedAt);
+  const cutoff = WorksheetPage.latestExpectedSlotStart(generatedAt);
 
   return [
     '# RTC tenant data audit',
     '',
     `- **Tenant:** ${TENANT}`,
     `- **Name filter:** operations starting with \`${NAME_PREFIX}\``,
-    `- **Date checked:** ${WorksheetPage.formatDate(generatedAt)}`,
+    `- **Daily checked against:** ${WorksheetPage.formatDate(yesterday)} ` +
+      '(yesterday — a daily aggregate cannot be complete until the day is over)',
+    `- **15 Minute checked against:** ${WorksheetPage.formatDate(generatedAt)} ` +
+      `(today, slots up to ${cutoff.toLocaleTimeString('en-US', {
+        hour: 'numeric',
+        minute: '2-digit',
+      })} — later slots have not had time to settle)`,
     `- **Frequencies:** ${FREQUENCIES.join(', ')} (data on either one counts)`,
     `- **Generated:** ${generatedAt.toISOString()}`,
     '',
@@ -213,11 +277,11 @@ function buildReport(results: AuditResult[], generatedAt: Date): string {
     '| Result | Count |',
     '| --- | --- |',
     `| Operations checked | ${results.length} |`,
-    `| Has data for today | ${withData.length} |`,
-    `| No data for today | ${empty.length} |`,
+    `| Has data | ${withData.length} |`,
+    `| No data | ${empty.length} |`,
     `| Could not be read | ${unreadable.length} |`,
     '',
-    `## No data for today (${empty.length})`,
+    `## No data (${empty.length})`,
     '',
     table(empty, '_None — every operation that could be read had data._'),
     '',
@@ -229,7 +293,7 @@ function buildReport(results: AuditResult[], generatedAt: Date): string {
         table(unreadable, '')
       : '_None._',
     '',
-    `## Has data for today (${withData.length})`,
+    `## Has data (${withData.length})`,
     '',
     table(withData, '_None._'),
     '',
@@ -245,7 +309,6 @@ test.use({ video: 'off', trace: 'off' });
 test.describe('RTC tenant data audit', () => {
   test('every RTC operation under the tenant has data for today', async ({
     page,
-    context,
     opsHome,
   }, testInfo) => {
     // 150 operations, each needing its own app load, so this runs far beyond
@@ -271,20 +334,58 @@ test.describe('RTC tenant data audit', () => {
         `"${TENANT}" with ${CONCURRENCY} concurrent page(s)...`,
     );
 
-    // Reuse the signed-in context so every page shares the same session. Each
-    // concurrent lane gets its own page; the fixture page is left out of the
-    // pool so every lane's page can be freely recycled.
-    const pool = await Promise.all(
-      Array.from({ length: Math.min(CONCURRENCY, operations.length) }, () =>
-        context.newPage(),
-      ),
+    // Each lane runs its own browser rather than sharing the fixture's. A lane
+    // that dies then takes only itself down, and recycling can release the
+    // browser process's memory too, not just the page's. Every lane loads the
+    // same saved sign-in, so they share a session without sharing a process.
+    const storageState = testInfo.project.use.storageState as string;
+    const laneCount = Math.min(CONCURRENCY, operations.length);
+
+    interface Lane {
+      browser: Browser;
+      context: BrowserContext;
+      page: Page;
+    }
+
+    const openLane = async (): Promise<Lane> => {
+      // Launching can fail transiently when several browsers are being torn
+      // down and rebuilt at once, so give it a couple of tries before letting
+      // the failure reach the caller.
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const browser = await chromium.launch();
+          const laneContext = await browser.newContext({ storageState });
+          return {
+            browser,
+            context: laneContext,
+            page: await laneContext.newPage(),
+          };
+        } catch (error) {
+          lastError = error;
+          await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+        }
+      }
+      throw lastError;
+    };
+
+    const lanes: Lane[] = await Promise.all(
+      Array.from({ length: laneCount }, () => openLane()),
     );
-    const uses = new Array(pool.length).fill(0);
+    const uses = new Array(lanes.length).fill(0);
 
     const renew = async (slot: number) => {
-      await pool[slot].close().catch(() => undefined);
-      pool[slot] = await context.newPage();
+      // The replacement is opened before the old lane is discarded, so a failed
+      // launch leaves the lane exactly as it was rather than holding a closed
+      // browser that every later operation would fail against.
+      const replacement = await openLane();
+      const previous = lanes[slot];
+      lanes[slot] = replacement;
       uses[slot] = 0;
+      // Closing the context first lets a healthy browser shut down cleanly;
+      // both are best-effort because a crashed lane has nothing left to close.
+      await previous.context.close().catch(() => undefined);
+      await previous.browser.close().catch(() => undefined);
     };
 
     let completed = 0;
@@ -292,17 +393,21 @@ test.describe('RTC tenant data audit', () => {
     try {
       results = await inParallel(
         operations,
-        pool.length,
+        lanes.length,
         async (operation, _index, slot) => {
           // Every navigation re-boots the SPA and refetches several megabytes
           // of hierarchy, and the renderer does not give all of it back. Left
-          // alone, a page dies partway through a 150-operation run and takes
-          // the browser with it, so lanes are replaced periodically.
-          if (uses[slot] >= RECYCLE_AFTER) await renew(slot);
+          // alone, a lane dies partway through a 150-operation run, so lanes
+          // are rebuilt periodically rather than waiting for that.
+          if (uses[slot] >= RECYCLE_AFTER) {
+            // A scheduled rebuild that fails is not worth losing the run over;
+            // the lane keeps its current browser and tries again next time.
+            await renew(slot).catch(() => undefined);
+          }
           uses[slot] += 1;
 
           const result = await auditOperation(
-            () => pool[slot],
+            () => lanes[slot].page,
             () => renew(slot),
             operation,
             baseURL,
@@ -319,7 +424,10 @@ test.describe('RTC tenant data audit', () => {
       );
     } finally {
       await Promise.all(
-        pool.map((extra) => extra.close().catch(() => undefined)),
+        lanes.map(async (lane) => {
+          await lane.context.close().catch(() => undefined);
+          await lane.browser.close().catch(() => undefined);
+        }),
       );
     }
 
