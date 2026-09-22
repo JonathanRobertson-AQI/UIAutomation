@@ -1,5 +1,11 @@
 import { expect, test } from '../../src/fixtures/test';
-import { env } from '../../src/config/env';
+import { env, STORAGE_STATE } from '../../src/config/env';
+import { randomUUID } from 'node:crypto';
+import type { BrowserContext } from '@playwright/test';
+import {
+  SampleManagerPage,
+  type SampleManagerSnapshot,
+} from '../../src/pages/SampleManagerPage';
 
 /**
  * AQI-11578 - VOC: Sample Manager: custom observation dropdown on
@@ -13,15 +19,51 @@ import { env } from '../../src/config/env';
  *   custom observation.
  *
  * These tests WRITE REAL DATA and unsubmit samples, so they live in `full`
- * and must never be pointed at production.
+ * and must never be pointed at production. `SAMPLE_MANAGER_*` must point at
+ * a dedicated, disposable operation/sample - see `.env.example` and the
+ * README. Whatever value each of those held before this suite ran is
+ * captured in `beforeAll` and restored in `afterAll`, using a separate
+ * page/context so cleanup does not depend on any individual test's page
+ * still being usable after a failure.
  *
  * Serial, because every test drives the same analyte on the same sample.
  */
 const { plantId, textAnalyte, sampleName, customObservation } =
   env.sampleManager;
 
+/** Run-specific tag with no practical chance of colliding across runs/workers. */
+const RUN_ID = randomUUID();
+
 test.describe('AQI-11578 custom observation dropdown', () => {
   test.describe.configure({ mode: 'serial' });
+
+  let cleanupContext: BrowserContext;
+  let cleanupSampleManager: SampleManagerPage;
+  let snapshot: SampleManagerSnapshot;
+
+  test.beforeAll(async ({ browser }) => {
+    cleanupContext = await browser.newContext({ storageState: STORAGE_STATE });
+    const page = await cleanupContext.newPage();
+    cleanupSampleManager = new SampleManagerPage(page);
+    snapshot = await cleanupSampleManager.captureSnapshot(
+      plantId,
+      textAnalyte,
+      sampleName,
+    );
+  });
+
+  test.afterAll(async () => {
+    try {
+      await cleanupSampleManager.restoreSnapshot(
+        plantId,
+        textAnalyte,
+        sampleName,
+        snapshot,
+      );
+    } finally {
+      await cleanupContext.close();
+    }
+  });
 
   test.beforeEach(async ({ sampleManager }) => {
     await sampleManager.gotoSchedule(plantId);
@@ -94,7 +136,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   test('an option chosen with the mouse survives the overlay closing', async ({
     sampleManager,
   }) => {
-    const seed = `Seed ${Date.now() % 100000}`;
+    const seed = `Seed ${RUN_ID}`;
 
     await sampleManager.openEnterResultsByTest(textAnalyte);
     const cell = sampleManager.resultCell(0);
@@ -130,7 +172,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     page,
     sampleManager,
   }) => {
-    const seed = `Seed ${Date.now() % 100000}`;
+    const seed = `Seed ${RUN_ID}`;
 
     await sampleManager.openEnterResultsByTest(textAnalyte);
     const cell = sampleManager.resultCell(0);
@@ -175,7 +217,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     test.skip(rows.length < 2, 'needs a test with at least two samples');
 
     const values = rows.map(
-      (_, i) => `Row${i} ${Date.now() % 100000}`,
+      (_, i) => `Row${i} ${RUN_ID}`,
     );
 
     for (const [i, rowIndex] of rows.entries()) {
@@ -208,7 +250,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   test('Enter sample results lists exactly the configured observations', async ({
     sampleManager,
   }) => {
-    const dialog = await sampleManager.openSample(sampleName);
+    const { dialog } = await sampleManager.openSample(sampleName);
     const cell = await sampleManager.sampleResultCell(dialog, textAnalyte);
 
     const input = await sampleManager.openEditor(cell);
@@ -224,7 +266,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   test('the option list filters by case-insensitive substring', async ({
     sampleManager,
   }) => {
-    const dialog = await sampleManager.openSample(sampleName);
+    const { dialog } = await sampleManager.openSample(sampleName);
     const cell = await sampleManager.sampleResultCell(dialog, textAnalyte);
     const input = await sampleManager.openEditor(cell);
 
@@ -244,7 +286,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   test('a value typed in the wrong case is stored in its canonical casing', async ({
     sampleManager,
   }) => {
-    const dialog = await sampleManager.openSample(sampleName);
+    const { dialog } = await sampleManager.openSample(sampleName);
     const cell = await sampleManager.sampleResultCell(dialog, textAnalyte);
 
     const input = await sampleManager.openEditor(cell);
@@ -267,7 +309,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   }) => {
     // Mixed case plus a double space: the two things a naive normalise-then-
     // save would quietly destroy.
-    const value = `Probe ${Date.now() % 100000}  MiXeD`;
+    const value = `Probe ${RUN_ID}  MiXeD`;
 
     await sampleManager.openEnterResultsByTest(textAnalyte);
     const cell = sampleManager.resultCell(0);
@@ -289,7 +331,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     page,
     sampleManager,
   }) => {
-    const payload = `<img src=x onerror=alert(1)> ${Date.now() % 100000}`;
+    const payload = `<img src=x onerror=alert(1)> ${RUN_ID}`;
 
     // If the payload were ever injected as markup, `onerror` would fire and
     // this would catch the resulting dialog rather than letting it hang.
@@ -334,7 +376,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
   test('a value entered by test is shown on Enter sample results', async ({
     sampleManager,
   }) => {
-    const value = `Crossed ${Date.now() % 100000}`;
+    const value = `Crossed ${RUN_ID}`;
 
     await sampleManager.openEnterResultsByTest(textAnalyte);
     const byTestCell = sampleManager.resultCell(0);
@@ -345,7 +387,7 @@ test.describe('AQI-11578 custom observation dropdown', () => {
     await sampleManager.saveByTest();
 
     await sampleManager.gotoSchedule(plantId);
-    const dialog = await sampleManager.openSample(sampleName);
+    const { dialog } = await sampleManager.openSample(sampleName);
     const sampleCell = await sampleManager.sampleResultCell(
       dialog,
       textAnalyte,

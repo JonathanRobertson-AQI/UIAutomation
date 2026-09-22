@@ -4,8 +4,11 @@ Playwright UI tests for the AQI ops application.
 
 Two ways to run:
 
-- **Automated** — on pull requests and nightly against the feature environment.
+- **Locally** — `npm run test:*`, against whatever `BASE_URL` you configure.
 - **On demand** — from the GitHub Actions tab, pointed at any published environment.
+  The workflow is manual-only (`workflow_dispatch`); it does not run on pull
+  requests or a schedule, because it can also run the data-mutating `full`
+  suite.
 
 ## Setup
 
@@ -38,6 +41,10 @@ For CI, the same values live in the repository settings:
 | `BASE_URL` | Settings → Secrets and variables → Actions → **Variables** |
 | `TEST_PLANT_NAME` | Settings → Secrets and variables → Actions → **Variables** |
 | `TEST_WORKSHEET_NAME` | Settings → Secrets and variables → Actions → **Variables** |
+| `SAMPLE_MANAGER_PLANT_ID` | Settings → Secrets and variables → Actions → **Variables** (only needed to run `full`) |
+| `SAMPLE_MANAGER_TEXT_ANALYTE` | Settings → Secrets and variables → Actions → **Variables** (only needed to run `full`) |
+| `SAMPLE_MANAGER_SAMPLE_NAME` | Settings → Secrets and variables → Actions → **Variables** (only needed to run `full`) |
+| `SAMPLE_MANAGER_CUSTOM_OBSERVATION` | Settings → Secrets and variables → Actions → **Variables** (only needed to run `full`) |
 
 ## Running tests
 
@@ -59,7 +66,14 @@ $env:BASE_URL='https://other-env.aquaticinformatics.net/ops/'; npm run test:smok
 ### On-demand runs against a published site
 
 Actions → **UI Tests** → *Run workflow*, then choose the base URL and the suite.
-The HTML report is uploaded as a build artifact.
+The HTML report is uploaded as a build artifact, and the job summary shows the
+base URL and project that were actually used for the run.
+
+Choosing `project: full` also requires typing `CONFIRM` into the
+`confirm_destructive` input — this suite writes data and unsubmits a sample,
+so the extra step exists to stop a destructive run being fired by accident.
+`public`, `smoke`, and `smoke-webkit`/`smoke-firefox` need no confirmation and
+remain safe to run against production.
 
 ## Test suites
 
@@ -95,6 +109,24 @@ npx playwright test --project=full --repeat-each=3 --workers=1
 Without it, two workers write the same cell and each reads back the other's
 value. The same caveat applies to running the suite from two machines at once
 against one environment.
+
+### Sample Manager custom observation tests
+
+`tests/full/sample-manager-custom-observation.spec.ts` writes results and
+unsubmits a sample in Sample Manager, so `SAMPLE_MANAGER_PLANT_ID`,
+`SAMPLE_MANAGER_TEXT_ANALYTE`, `SAMPLE_MANAGER_SAMPLE_NAME`, and
+`SAMPLE_MANAGER_CUSTOM_OBSERVATION` are all **required** to run it — there is
+no built-in default. Point them at an operation/sample set up specifically to
+be mutated by automated tests, never at shared or production configuration.
+The operation needs a text analyte linked to a Rio parameter that defines
+custom observations, which is why it is addressed by GUID rather than name.
+
+The suite snapshots the Result value on both screens and the sample's
+submitted/unsubmitted state in `beforeAll`, and restores them in `afterAll` —
+using its own browser context so cleanup still runs even if an earlier test in
+the file failed. Even so, only point it at a disposable sample: cleanup is
+best-effort against a live app and is not a substitute for using an operation
+you're comfortable seeing mutated.
 
 ### Auditing a whole tenant
 

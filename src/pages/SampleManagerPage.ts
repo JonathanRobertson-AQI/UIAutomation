@@ -19,6 +19,16 @@ import { expect, type Locator, type Page } from '@playwright/test';
  * value saved with two consecutive spaces will look like it was mangled when
  * in fact only its *rendering* collapsed.
  */
+/** State captured before AQI-11578's data-mutating suite runs, so it can be restored. */
+export interface SampleManagerSnapshot {
+  /** Original Result value on row 0 of the "Enter results by test" grid. */
+  byTestValue: string;
+  /** Original Result value for the analyte in the "Enter sample results" dialog. */
+  sampleValue: string;
+  /** Whether the sample was submitted (and therefore locked) before the suite ran. */
+  wasSubmitted: boolean;
+}
+
 export class SampleManagerPage {
   constructor(private readonly page: Page) {}
 
@@ -129,11 +139,17 @@ export class SampleManagerPage {
    * tests quietly start failing the moment the week rolls over, which is a
    * calendar accident rather than a regression.
    *
-   * Submitted samples open read-only, so this unlocks them when it has to.
-   * That is a real mutation of the sample's status - these tests are in the
-   * `full` project for exactly that reason and must not run against prod.
+   * Submitted samples open read-only, so this unlocks them when it has to
+   * (controlled by `unsubmitIfLocked`, on by default). That is a real
+   * mutation of the sample's status - these tests are in the `full` project
+   * for exactly that reason and must not run against prod. The returned
+   * `wasSubmitted` flag records whether the sample was locked when opened,
+   * so a caller can restore that state afterwards (see `submitSample`).
    */
-  async openSample(sampleName: string, weeksToSearch = 6): Promise<Locator> {
+  async openSample(
+    sampleName: string,
+    { weeksToSearch = 6, unsubmitIfLocked = true } = {},
+  ): Promise<{ dialog: Locator; wasSubmitted: boolean }> {
     const card = this.activityCards.filter({ hasText: sampleName }).first();
 
     for (let week = 0; week < weeksToSearch; week++) {
@@ -156,11 +172,113 @@ export class SampleManagerPage {
     });
 
     const unlock = dialog.getByText('Unsubmit and unlock', { exact: false });
-    if (await unlock.count()) {
+    const wasSubmitted = (await unlock.count()) > 0;
+    if (wasSubmitted && unsubmitIfLocked) {
       await unlock.first().click();
       await expect(unlock).toHaveCount(0, { timeout: 60_000 });
     }
-    return dialog;
+    return { dialog, wasSubmitted };
+  }
+
+  /**
+   * Re-submit a sample that `openSample` unlocked, restoring it to the
+   * locked state it was found in.
+   *
+   * The submit action is assumed to be the same control that toggles to
+   * "Unsubmit and unlock" once a sample is locked again; if the app labels it
+   * differently this is a no-op and the caller is left unsubmitted, which is
+   * safer than guessing at the wrong control.
+   */
+  async submitSample(dialog: Locator): Promise<void> {
+    const submit = dialog.getByRole('button', { name: /submit/i }).first();
+    if (await submit.count()) {
+      await submit.click();
+      await expect(
+        dialog.getByText('Unsubmit and unlock', { exact: false }),
+      ).toBeVisible({ timeout: 60_000 });
+    }
+  }
+
+  /** Persist an "Enter sample results" dialog if it has a Save control, else just close it. */
+  async saveSample(dialog: Locator): Promise<void> {
+    const save = dialog.getByRole('button', { name: 'Save', exact: true });
+    if (await save.count()) {
+      await save.click();
+      await expect(this.page.locator('mat-dialog-container')).toHaveCount(0, {
+        timeout: 90_000,
+      });
+    } else {
+      await this.closeDialog();
+    }
+  }
+
+  /** Dismiss whatever dialog is currently open without saving. */
+  async closeDialog(): Promise<void> {
+    if (!(await this.page.locator('mat-dialog-container').count())) return;
+    await this.page.keyboard.press('Escape');
+    await expect(this.page.locator('mat-dialog-container')).toHaveCount(0, {
+      timeout: 30_000,
+    });
+  }
+
+  // ------------------------------------------------------ snapshot/restore
+
+  /**
+   * Capture whatever this suite is about to mutate, before any test runs, so
+   * it can be put back afterwards. Must be called before the first write.
+   */
+  async captureSnapshot(
+    plantId: string,
+    textAnalyte: string,
+    sampleName: string,
+  ): Promise<SampleManagerSnapshot> {
+    await this.gotoSchedule(plantId);
+    await this.openEnterResultsByTest(textAnalyte);
+    const byTestValue = await this.readValue(this.resultCell(0));
+    await this.closeDialog();
+
+    await this.gotoSchedule(plantId);
+    const { dialog, wasSubmitted } = await this.openSample(sampleName);
+    const cell = await this.sampleResultCell(dialog, textAnalyte);
+    const sampleValue = await this.readValue(cell);
+    await this.closeDialog();
+
+    return { byTestValue, sampleValue, wasSubmitted };
+  }
+
+  /**
+   * Restore whatever `captureSnapshot` recorded. Safe to call even if some
+   * tests failed partway through - each step is independent of prior state.
+   */
+  async restoreSnapshot(
+    plantId: string,
+    textAnalyte: string,
+    sampleName: string,
+    snapshot: SampleManagerSnapshot,
+  ): Promise<void> {
+    await this.gotoSchedule(plantId);
+    await this.openEnterResultsByTest(textAnalyte);
+    const byTestCell = this.resultCell(0);
+    const byTestInput = await this.openEditor(byTestCell);
+    await byTestInput.fill(snapshot.byTestValue);
+    await this.commitEditor(byTestCell);
+    await this.saveByTest();
+
+    await this.gotoSchedule(plantId);
+    const { dialog } = await this.openSample(sampleName);
+    const cell = await this.sampleResultCell(dialog, textAnalyte);
+    const input = await this.openEditor(cell);
+    await input.fill(snapshot.sampleValue);
+    await this.commitEditor(cell);
+    await this.saveSample(dialog);
+
+    if (snapshot.wasSubmitted) {
+      const { dialog: reopened } = await this.openSample(sampleName, {
+        unsubmitIfLocked: false,
+      });
+      await this.submitSample(reopened);
+      await this.closeDialog();
+    }
   }
 
   /** Step the schedule board back one week and wait for it to re-render. */
