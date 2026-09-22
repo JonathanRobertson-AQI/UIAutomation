@@ -1,7 +1,10 @@
 name: UI Tests
 
 on:
-  # On-demand runs against any published environment.
+  # Manual only. This workflow can run the data-mutating `full` suite, so it
+  # must never be triggered by a pull_request or schedule event - those would
+  # let anyone with write access to a PR branch fire destructive runs, or run
+  # them unattended against a shared environment.
   workflow_dispatch:
     inputs:
       base_url:
@@ -23,13 +26,13 @@ on:
         description: 'Optional tag filter, e.g. @smoke'
         required: false
         default: ''
-
-  schedule:
-    # Nightly regression against the feature environment.
-    - cron: '0 8 * * *'
-
-  pull_request:
-    branches: [main]
+      confirm_destructive:
+        description: >-
+          Required only when project=full: type CONFIRM to acknowledge this
+          suite writes data and unsubmits a sample against SAMPLE_MANAGER_*
+          (must be a dedicated, disposable, non-production operation/sample).
+        required: false
+        default: ''
 
 concurrency:
   group: ui-tests-${{ github.ref }}-${{ inputs.base_url || 'default' }}
@@ -45,9 +48,30 @@ jobs:
       TEST_PASSWORD: ${{ secrets.TEST_PASSWORD }}
       TEST_PLANT_NAME: ${{ vars.TEST_PLANT_NAME }}
       TEST_WORKSHEET_NAME: ${{ vars.TEST_WORKSHEET_NAME }}
+      SAMPLE_MANAGER_PLANT_ID: ${{ vars.SAMPLE_MANAGER_PLANT_ID }}
+      SAMPLE_MANAGER_TEXT_ANALYTE: ${{ vars.SAMPLE_MANAGER_TEXT_ANALYTE }}
+      SAMPLE_MANAGER_SAMPLE_NAME: ${{ vars.SAMPLE_MANAGER_SAMPLE_NAME }}
+      SAMPLE_MANAGER_CUSTOM_OBSERVATION: ${{ vars.SAMPLE_MANAGER_CUSTOM_OBSERVATION }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Report run parameters
+        run: |
+          {
+            echo "### UI Tests run parameters"
+            echo "- Base URL: \`${{ env.BASE_URL }}\`"
+            echo "- Project: \`${{ inputs.project || 'smoke' }}\`"
+            echo "- Grep filter: \`${{ inputs.grep || '(none)' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guard the destructive suite
+        if: ${{ inputs.project == 'full' }}
+        run: |
+          if [ "${{ inputs.confirm_destructive }}" != "CONFIRM" ]; then
+            echo "::error::project=full writes data and unsubmits a sample. Re-run workflow_dispatch with confirm_destructive set to the literal text CONFIRM to acknowledge this against a disposable, non-production SAMPLE_MANAGER_* target."
+            exit 1
+          fi
 
       - uses: actions/setup-node@v4
         with:
@@ -72,3 +96,4 @@ jobs:
           name: playwright-report-${{ github.run_attempt }}
           path: playwright-report/
           retention-days: 14
+
